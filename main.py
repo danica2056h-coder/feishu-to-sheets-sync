@@ -3,118 +3,82 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta
 
-# === 基础配置 (从环境变量读取) ===
+# --- 基础配置 ---
+MASTER_ID = "1X7yDRVlOgG42flnSuki7BUF68kbO0cgn5GF-wu8g9cw"
 APP_ID = os.environ.get("FEISHU_APP_ID")
 APP_SECRET = os.environ.get("FEISHU_APP_SECRET")
-# 总控表 ID
-MASTER_ID = "1X7yDRVlOgG42flnSuki7BUF68kbO0cgn5GF-wu8g9cw" 
 
-# === 1. 授权与工具函数 ===
-def get_gs_client():
-    """授权 Google Sheets API"""
+def get_gc():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds_json = os.environ.get("G_SERVICE_ACCOUNT")
-    if not creds_json: raise Exception("未配置 G_SERVICE_ACCOUNT Secrets")
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(creds_json), scope)
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(os.environ.get("G_SERVICE_ACCOUNT")), scope)
     return gspread.authorize(creds)
 
-def get_tenant_token():
-    """获取飞书通行证"""
-    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-    r = requests.post(url, json={"app_id": APP_ID, "app_secret": APP_SECRET})
+def get_feishu_token():
+    r = requests.post("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", 
+                      json={"app_id": APP_ID, "app_secret": APP_SECRET})
     return r.json().get("tenant_access_token")
 
-def get_feishu_data(token, app_token, table_id):
-    """抓取飞书多维表格所有数据"""
-    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
-    headers = {"Authorization": f"Bearer {token}"}
-    params = {"page_size": 500} # 每次最多500条
-    r = requests.get(url, headers=headers, params=params)
-    data = r.json()
-    if data.get("code") != 0: return None
-    
-    records = data['data'].get('items', [])
-    if not records: return []
-    
-    # 转换为二维数组（包含表头）
-    headers_list = list(records[0]['fields'].keys())
-    rows = [headers_list]
-    for item in records:
-        rows.append([str(item['fields'].get(k, "")) for k in headers_list])
-    return rows
-
-# === 2. 核心同步逻辑 ===
-def sync_single_table(gc, spreadsheet_id, sheet_name, feishu_app_token, feishu_table_id, log_sheet, log_row, mode_label):
+def sync_row(gc, master_sheet, row_idx, mode_tag):
     """
-    同步单个 Sheet 并回写状态
+    核心搬运：假设 B:副本ID, G:飞书Token, H:飞书TableID, A:Sheet名
     """
     start_time = time.time()
+    row_data = master_sheet.row_values(row_idx)
+    # 填充默认值防止越界
+    row_data += [""] * (10 - len(row_data))
+    
+    target_ss_id = row_data[1]    # B列
+    target_sheet_name = row_data[0] # A列
+    bitable_token = row_data[6]   # G列
+    table_id = row_data[7]        # H列
+
     try:
-        # 1. 抓取飞书数据
-        token = get_tenant_token()
-        data = get_feishu_data(token, feishu_app_token, feishu_table_id)
-        if data is None: raise Exception("飞书数据抓取失败")
-
-        # 2. 写入谷歌表格
-        ss = gc.open_by_key(spreadsheet_id)
-        try:
-            target_sheet = ss.worksheet(sheet_name)
-        except:
-            target_sheet = ss.add_worksheet(title=sheet_name, rows="100", cols="20")
+        # 1. 抓取飞书 (全量抓取)
+        fs_token = get_feishu_token()
+        res = requests.get(f"https://open.feishu.cn/open-apis/bitable/v1/apps/{bitable_token}/tables/{table_id}/records",
+                           headers={"Authorization": f"Bearer {fs_token}"}, params={"page_size": 500})
+        items = res.json().get('data', {}).get('items', [])
+        if not items: raise Exception("无数据")
         
-        target_sheet.clear()
-        target_sheet.update('A1', data) # 批量写入
+        # 转换数据格式
+        headers = list(items[0]['fields'].keys())
+        output = [headers] + [[str(i['fields'].get(k, "")) for k in headers] for i in items]
 
-        # 3. 计算耗时与时间
+        # 2. 写入谷歌 (强制覆盖)
+        target_ss = gc.open_by_key(target_ss_id)
+        try:
+            ws = target_ss.worksheet(target_sheet_name)
+        except:
+            ws = target_ss.add_worksheet(title=target_sheet_name, rows="1000", cols="26")
+        ws.clear()
+        ws.update('A1', output)
+
+        # 3. 回写状态
         duration = f"{time.time() - start_time:.2f}s"
         bj_now = (datetime.utcnow() + timedelta(hours=8)).strftime('%H:%M')
-
-        # 4. 回写日志 (D:状态, E:时间, F:时长) 并复位 C 列
-        log_sheet.update_cell(log_row, 4, f"{mode_label}-成功")
-        log_sheet.update_cell(log_row, 5, bj_now)
-        log_sheet.update_cell(log_row, 6, duration)
-        log_sheet.update_cell(log_row, 3, False) # 复选框弹回
-        print(f"✅ 已完成: {sheet_name} ({duration})")
+        
+        master_sheet.update_cell(row_idx, 4, f"{mode_tag}-完成") # D列
+        master_sheet.update_cell(row_idx, 5, bj_now)          # E列
+        master_sheet.update_cell(row_idx, 6, duration)        # F列
+        master_sheet.update_cell(row_idx, 3, False)           # C列复位
 
     except Exception as e:
-        log_sheet.update_cell(log_row, 4, f"失败: {str(e)[:20]}")
-        log_sheet.update_cell(log_row, 3, False)
-        print(f"❌ 失败: {sheet_name}, 错误: {e}")
+        master_sheet.update_cell(row_idx, 4, f"失败:{str(e)[:15]}")
+        master_sheet.update_cell(row_idx, 3, False)
 
-# === 3. 调度引擎 ===
 def main():
-    payload_str = os.environ.get('PAYLOAD', '{}')
-    payload = json.loads(payload_str) if payload_str and payload_str != 'null' else {}
-    gc = get_gs_client()
-    
-    # 场景 A: 手动触发 (Priority 1)
-    if payload.get('priority') == "1_MANUAL":
-        source_id = payload['source_id']
-        row = payload['row']
-        ss = gc.open_by_key(source_id)
-        log_sheet = ss.get_worksheet(0) # 默认第一页为日志页
-        
-        # 读取该行配置 (假设 B 列是副本ID或TableID，这里根据你表格实际列调整)
-        row_data = log_sheet.row_values(row)
-        # 示例：sync_single_table(gc, source_id, row_data[0], row_data[1], row_data[2], log_sheet, row, "手触")
-        # 这里需要根据你表格 A, B, C 列的具体内容来传入参数
-        print(f"正在处理手动刷新: 第 {row} 行")
-        # 为演示完整性，此处执行同步动作...
-        sync_single_table(gc, source_id, "Sheet1", "飞书Token", "飞书TableID", log_sheet, row, "手触")
+    payload = json.loads(os.environ.get('PAYLOAD', '{}'))
+    gc = get_gc()
+    master_sheet = gc.open_by_key(MASTER_ID).get_worksheet(0)
 
-    # 场景 B: 15分钟定时刷新 (Priority 3)
+    if payload.get('priority') == "1_MANUAL":
+        # 情况：手动刷新单行
+        sync_row(gc, master_sheet, payload['row'], "手触")
     else:
-        print("⏰ 启动 15 分钟全量巡检...")
-        master_ss = gc.open_by_key(MASTER_ID)
-        master_log = master_ss.get_worksheet(0)
-        configs = master_log.get_all_values()
-        
-        # 遍历总控表 150 行 (跳过表头)
-        for i, config in enumerate(configs[1:], start=2):
-            if i > 151: break
-            # 逻辑：逐个搬运
-            # sync_single_table(gc, config[1], config[0], ...)
-            pass
+        # 情况：15分钟定时全量刷新
+        print("开始 150 行全量搬运...")
+        for i in range(2, 152): # 遍历第2到151行
+            sync_row(gc, master_sheet, i, "定时")
 
 if __name__ == "__main__":
     main()
