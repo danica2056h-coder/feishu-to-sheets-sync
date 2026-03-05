@@ -1,31 +1,33 @@
-name: 飞书数据同步引擎
+name: 飞书数据同步引擎-矩阵并发版
 
 on:
   repository_dispatch:
     types: [remote_sync]
-  workflow_dispatch:      # 👈 这个能调出 Actions 页面的 Run workflow 按钮
+  workflow_dispatch:
   schedule:
-    - cron: '*/15 * * * *' 
-
-concurrency:
-  group: sync-group
-  cancel-in-progress: false 
+    - cron: '*/15 1-2 * * *'
+    - cron: '0,15,30 3 * * *'
 
 jobs:
   sync_job:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        row_index: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+    
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
       - run: pip install requests gspread oauth2client
-      - name: 执行同步
+      - name: 矩阵节点运行
         env:
           PAYLOAD: ${{ toJson(github.event.client_payload) }}
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
-          # 👈 适配你 image_174df8.png 中的名称
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           MASTER_SHEET_ID: ${{ secrets.MASTER_SHEET_ID }}
+          TARGET_ROW: ${{ matrix.row_index }}
         run: python main.py
