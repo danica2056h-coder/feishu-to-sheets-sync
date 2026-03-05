@@ -1,41 +1,35 @@
-name: 云端极速同步系统
+name: Feishu Real-time Sync
 
 on:
-  schedule:
-    # 周一、周五：09:20 - 11:00，每 20 分钟运行一次
-    - cron: '20,40 1 * * 1,5'
-    - cron: '0,20,40 2 * * 1,5'
-    - cron: '0 3 * * 1,5'
-    
-    # 周二、三、四：09:20 - 11:00，每 25 分钟运行一次
-    - cron: '20,45 1 * * 2-4'
-    - cron: '10,35 2 * * 2-4'
-    - cron: '0 3 * * 2-4'
-    
-    # 周六、周日：09:45, 10:30, 11:15 精准三次运行
-    - cron: '45 1 * * 6,0'
-    - cron: '30 2 * * 6,0'
-    - cron: '15 3 * * 6,0'
-  
+  # 接收 Laf 发送的实时变动信号
+  repository_dispatch:
+    types: [remote_sync]
+  # 保留手动触发按钮，以防万一需要手动全量跑
   workflow_dispatch: 
 
-concurrency:
-  group: sync-group
-  cancel-in-progress: false
-
 jobs:
-  sync_job:
+  sync_changed_table:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - name: 设置 Python
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      - name: 安装依赖
-        run: pip install -r requirements.txt
-      - name: 执行同步逻辑
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests gspread pandas
+
+      - name: Run sync script
         env:
+          # 把 Laf 传来的飞书 table_id 存入环境变量，供 Python 读取
+          TARGET_TABLE_ID: ${{ github.event.client_payload.table_id }}
+          
+          # 读取你的保险箱密钥
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
