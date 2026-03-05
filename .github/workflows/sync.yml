@@ -1,4 +1,4 @@
-name: 飞书数据同步引擎-矩阵并发版
+name: 飞书数据同步引擎-全自动动态矩阵版
 
 on:
   repository_dispatch:
@@ -9,12 +9,56 @@ on:
     - cron: '0,15,30 3 * * *'
 
 jobs:
+  prepare_matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - run: pip install gspread oauth2client
+      - name: 侦测总控表有效行数
+        id: set-matrix
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          MASTER_SHEET_ID: ${{ secrets.MASTER_SHEET_ID }}
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          cat << 'EOF' > setup.py
+          import os, json, gspread
+          from oauth2client.service_account import ServiceAccountCredentials
+
+          payload_raw = os.environ.get('PAYLOAD', '{}')
+          payload = json.loads(payload_raw) if payload_raw and payload_raw != 'null' else {}
+          manual_row = payload.get('row')
+          source_id = payload.get('source_id')
+          master_id = os.environ.get('MASTER_SHEET_ID')
+
+          if payload.get('priority') == '1_MANUAL' and source_id == master_id and manual_row and manual_row > 2:
+              matrix = [manual_row]
+          else:
+              scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+              creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(os.environ.get('GOOGLE_CREDENTIALS')), scope)
+              gc = gspread.authorize(creds)
+              ws = gc.open_by_key(master_id).get_worksheet(0)
+              vals = ws.col_values(1)
+              matrix = [i+1 for i, v in enumerate(vals) if i >= 2 and 'google' in v]
+              if not matrix: matrix = [3]
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"matrix={json.dumps(matrix)}\n")
+          EOF
+          python setup.py
+
   sync_job:
+    needs: prepare_matrix
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        row_index: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+        row_index: ${{ fromJson(needs.prepare_matrix.outputs.matrix) }}
     
     steps:
       - uses: actions/checkout@v3
