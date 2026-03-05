@@ -3,7 +3,7 @@ name: 飞书数据同步引擎
 on:
   repository_dispatch:
     types: [remote_sync]
-  workflow_dispatch:      # 👈 加上这一行，Actions 页面就会出现“Run workflow”按钮
+  workflow_dispatch:      # 👈 这个能调出 Actions 页面的 Run workflow 按钮
   schedule:
     - cron: '*/15 * * * *' 
 
@@ -15,20 +15,17 @@ jobs:
   sync_job:
     runs-on: ubuntu-latest
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v3
-      - name: 设置 Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      - name: 安装依赖
-        run: pip install requests gspread oauth2client
-      - name: 执行搬运
+      - run: pip install requests gspread oauth2client
+      - name: 执行同步
         env:
           PAYLOAD: ${{ toJson(github.event.client_payload) }}
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
-          # 👈 以下两行已适配你 image_174df8.png 中的名称
-          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }} 
+          # 👈 适配你 image_174df8.png 中的名称
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           MASTER_SHEET_ID: ${{ secrets.MASTER_SHEET_ID }}
         run: python main.py
