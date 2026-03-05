@@ -1,0 +1,44 @@
+name: 云端极速同步系统
+
+on:
+  schedule:
+    # 【周一、周五】北京时间 09:20 - 11:00，每 20 分钟运行一次
+    - cron: '20,40 1 * * 1,5'
+    - cron: '0,20,40 2 * * 1,5'
+    - cron: '0 3 * * 1,5'
+    
+    # 【周二、三、四】北京时间 09:20 - 11:00，每 25 分钟运行一次
+    - cron: '20,45 1 * * 2-4'
+    - cron: '10,35 2 * * 2-4'
+    - cron: '0 3 * * 2-4'
+    
+    # 【周六、周日】保持精准三次运行：09:45, 10:30, 11:15
+    - cron: '45 1 * * 6,0'
+    - cron: '30 2 * * 6,0'
+    - cron: '15 3 * * 6,0'
+  
+  workflow_dispatch: # 开启手动点火功能
+
+# 互斥机制：防止手动和自动任务同时写入导致冲突
+concurrency:
+  group: sync-group
+  cancel-in-progress: false
+
+jobs:
+  sync_job:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: 设置 Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+      - name: 执行同步逻辑
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          MASTER_SHEET_ID: ${{ secrets.MASTER_SHEET_ID }}
+        run: python main.py
