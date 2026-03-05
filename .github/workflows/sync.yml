@@ -3,13 +3,13 @@ name: 飞书数据同步引擎
 on:
   repository_dispatch:
     types: [remote_sync]
-  workflow_dispatch:      # 👈 必须有这一行，GitHub 界面才会显示 Run workflow 按钮
+  workflow_dispatch:      # 👈 加上这一行，Actions 页面就会出现“Run workflow”按钮
   schedule:
-    - cron: '*/15 * * * *' # 每 15 分钟运行一次
+    - cron: '*/15 * * * *' 
 
 concurrency:
   group: sync-group
-  cancel-in-progress: false # 确保 150 个表按顺序搬完，不会发生任务重叠
+  cancel-in-progress: false 
 
 jobs:
   sync_job:
@@ -28,5 +28,7 @@ jobs:
           PAYLOAD: ${{ toJson(github.event.client_payload) }}
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
-          G_SERVICE_ACCOUNT: ${{ secrets.G_SERVICE_ACCOUNT }}
+          # 👈 以下两行已适配你 image_174df8.png 中的名称
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }} 
+          MASTER_SHEET_ID: ${{ secrets.MASTER_SHEET_ID }}
         run: python main.py
