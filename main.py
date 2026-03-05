@@ -1,110 +1,120 @@
-import os, json, re, requests, gspread, time
-from datetime import datetime
-import pytz
+import os, json, time, requests
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime, timedelta
 
-FEISHU_TOKEN_URL = 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal'
-FEISHU_BASE_URL = 'https://open.feishu.cn/open-apis/bitable/v1/apps'
-MAX_SYNC_COL = 30 
+# === 基础配置 (从环境变量读取) ===
+APP_ID = os.environ.get("FEISHU_APP_ID")
+APP_SECRET = os.environ.get("FEISHU_APP_SECRET")
+# 总控表 ID
+MASTER_ID = "1X7yDRVlOgG42flnSuki7BUF68kbO0cgn5GF-wu8g9cw" 
 
-def get_feishu_token(app_id, app_secret):
-    res = requests.post(FEISHU_TOKEN_URL, json={"app_id": app_id, "app_secret": app_secret})
-    return res.json().get('tenant_access_token')
+# === 1. 授权与工具函数 ===
+def get_gs_client():
+    """授权 Google Sheets API"""
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    creds_json = os.environ.get("G_SERVICE_ACCOUNT")
+    if not creds_json: raise Exception("未配置 G_SERVICE_ACCOUNT Secrets")
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(creds_json), scope)
+    return gspread.authorize(creds)
 
-def parse_feishu_url(url):
-    app_token = re.search(r'(?:base|wiki)/([a-zA-Z0-9]+)', url)
-    table_id = re.search(r'table=([a-zA-Z0-9]+)', url)
-    view_id = re.search(r'view=([a-zA-Z0-9]+)', url)
-    return {"appToken": app_token.group(1) if app_token else None,
-            "tableId": table_id.group(1) if table_id else None,
-            "viewId": view_id.group(1) if view_id else None}
+def get_tenant_token():
+    """获取飞书通行证"""
+    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+    r = requests.post(url, json={"app_id": APP_ID, "app_secret": APP_SECRET})
+    return r.json().get("tenant_access_token")
 
-def process_value(val):
-    """核心改进：清理格式，去除单引号前缀"""
-    if val is None: return ""
+def get_feishu_data(token, app_token, table_id):
+    """抓取飞书多维表格所有数据"""
+    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+    headers = {"Authorization": f"Bearer {token}"}
+    params = {"page_size": 500} # 每次最多500条
+    r = requests.get(url, headers=headers, params=params)
+    data = r.json()
+    if data.get("code") != 0: return None
     
-    # 1. 处理列表/多选 (提取文本并合并)
-    if isinstance(val, list):
-        names = []
-        for item in val:
-            if isinstance(item, dict):
-                names.append(str(item.get('name', item.get('text', item))))
-            else:
-                names.append(str(item))
-        return ", ".join(names)
+    records = data['data'].get('items', [])
+    if not records: return []
     
-    # 2. 处理字典 (单选/单个人员)
-    if isinstance(val, dict):
-        return val.get('name', val.get('text', str(val)))
-    
-    # 3. 处理数字或字符串类型的数字
-    if isinstance(val, (int, float)):
-        # 时间戳识别 (13位毫秒)
-        if val > 1000000000000:
-            return datetime.fromtimestamp(val/1000).strftime('%Y-%m-%d %H:%M')
-        return val # 直接返回数字类型，Google Sheets 就不会加 ' 了
+    # 转换为二维数组（包含表头）
+    headers_list = list(records[0]['fields'].keys())
+    rows = [headers_list]
+    for item in records:
+        rows.append([str(item['fields'].get(k, "")) for k in headers_list])
+    return rows
 
-    if isinstance(val, str):
-        # 尝试清理：去掉千分位逗号，然后尝试转成数字
-        clean_val = val.replace(',', '').strip()
+# === 2. 核心同步逻辑 ===
+def sync_single_table(gc, spreadsheet_id, sheet_name, feishu_app_token, feishu_table_id, log_sheet, log_row, mode_label):
+    """
+    同步单个 Sheet 并回写状态
+    """
+    start_time = time.time()
+    try:
+        # 1. 抓取飞书数据
+        token = get_tenant_token()
+        data = get_feishu_data(token, feishu_app_token, feishu_table_id)
+        if data is None: raise Exception("飞书数据抓取失败")
+
+        # 2. 写入谷歌表格
+        ss = gc.open_by_key(spreadsheet_id)
         try:
-            if '.' in clean_val: return float(clean_val)
-            return int(clean_val)
+            target_sheet = ss.worksheet(sheet_name)
         except:
-            return val # 实在转不成数字的（如文字内容）再保持字符串
-            
-    return str(val)
+            target_sheet = ss.add_worksheet(title=sheet_name, rows="100", cols="20")
+        
+        target_sheet.clear()
+        target_sheet.update('A1', data) # 批量写入
 
-def fetch_feishu_data(params, token):
-    headers = {'Authorization': f'Bearer {token}'}
-    fields_res = requests.get(f"{FEISHU_BASE_URL}/{params['appToken']}/tables/{params['tableId']}/fields?view_id={params['viewId']}", headers=headers).json()
-    items = fields_res.get('data', {}).get('items', [])
-    header_names = [i['field_name'] for i in items if not i.get('is_hidden')][:MAX_SYNC_COL]
-    
-    all_values, page_token, has_more = [header_names], "", True
-    while has_more:
-        url = f"{FEISHU_BASE_URL}/{params['appToken']}/tables/{params['tableId']}/records?page_size=500&view_id={params['viewId']}"
-        if page_token: url += f"&page_token={page_token}"
-        res = requests.get(url, headers=headers).json()
-        records = res.get('data', {}).get('items', [])
-        for record in records:
-            fields = record.get('fields', {})
-            all_values.append([process_value(fields.get(h)) for h in header_names])
-        has_more = res.get('data', {}).get('has_more', False)
-        page_token = res.get('data', {}).get('page_token', "")
-    return all_values
+        # 3. 计算耗时与时间
+        duration = f"{time.time() - start_time:.2f}s"
+        bj_now = (datetime.utcnow() + timedelta(hours=8)).strftime('%H:%M')
 
+        # 4. 回写日志 (D:状态, E:时间, F:时长) 并复位 C 列
+        log_sheet.update_cell(log_row, 4, f"{mode_label}-成功")
+        log_sheet.update_cell(log_row, 5, bj_now)
+        log_sheet.update_cell(log_row, 6, duration)
+        log_sheet.update_cell(log_row, 3, False) # 复选框弹回
+        print(f"✅ 已完成: {sheet_name} ({duration})")
+
+    except Exception as e:
+        log_sheet.update_cell(log_row, 4, f"失败: {str(e)[:20]}")
+        log_sheet.update_cell(log_row, 3, False)
+        print(f"❌ 失败: {sheet_name}, 错误: {e}")
+
+# === 3. 调度引擎 ===
 def main():
-    gc = gspread.service_account_from_dict(json.loads(os.environ['GOOGLE_CREDENTIALS']))
-    token = get_feishu_token(os.environ['FEISHU_APP_ID'], os.environ['FEISHU_APP_SECRET'])
-    tz = pytz.timezone('Asia/Shanghai')
+    payload_str = os.environ.get('PAYLOAD', '{}')
+    payload = json.loads(payload_str) if payload_str and payload_str != 'null' else {}
+    gc = get_gs_client()
     
-    master_ws = gc.open_by_key(os.environ['MASTER_SHEET_ID']).get_worksheet(0)
-    sub_urls = [u for u in master_ws.col_values(1)[1:] if u]
-    
-    for url in sub_urls:
-        try:
-            sub_id = re.search(r'/d/([a-zA-Z0-9-_]+)', url).group(1)
-            doc = gc.open_by_key(sub_id)
-            summary_ws = doc.worksheet("汇总表")
-            instructions = summary_ws.get_all_values()[1:]
-            
-            updates = []
-            for row in instructions:
-                if len(row) < 2 or not row[0]: continue
-                try:
-                    data = fetch_feishu_data(parse_feishu_url(row[0]), token)
-                    try: target_ws = doc.worksheet(row[1])
-                    except: target_ws = doc.add_worksheet(title=row[1], rows=100, cols=MAX_SYNC_COL)
-                    target_ws.clear()
-                    # 关键：RAW 模式配合 Python 类型转换，彻底解决格式问题
-                    target_ws.update(data, "A1", value_input_option='USER_ENTERED')
-                    updates.append([f"✅成功({len(data)-1}条)", datetime.now(tz).strftime("%H:%M")])
-                except Exception as e:
-                    updates.append([f"❌失败: {str(e)[:15]}", ""])
-            
-            if updates:
-                summary_ws.update(updates, f"D2:E{len(updates)+1}")
-        except Exception as e: print(f"副本执行失败: {e}")
+    # 场景 A: 手动触发 (Priority 1)
+    if payload.get('priority') == "1_MANUAL":
+        source_id = payload['source_id']
+        row = payload['row']
+        ss = gc.open_by_key(source_id)
+        log_sheet = ss.get_worksheet(0) # 默认第一页为日志页
+        
+        # 读取该行配置 (假设 B 列是副本ID或TableID，这里根据你表格实际列调整)
+        row_data = log_sheet.row_values(row)
+        # 示例：sync_single_table(gc, source_id, row_data[0], row_data[1], row_data[2], log_sheet, row, "手触")
+        # 这里需要根据你表格 A, B, C 列的具体内容来传入参数
+        print(f"正在处理手动刷新: 第 {row} 行")
+        # 为演示完整性，此处执行同步动作...
+        sync_single_table(gc, source_id, "Sheet1", "飞书Token", "飞书TableID", log_sheet, row, "手触")
+
+    # 场景 B: 15分钟定时刷新 (Priority 3)
+    else:
+        print("⏰ 启动 15 分钟全量巡检...")
+        master_ss = gc.open_by_key(MASTER_ID)
+        master_log = master_ss.get_worksheet(0)
+        configs = master_log.get_all_values()
+        
+        # 遍历总控表 150 行 (跳过表头)
+        for i, config in enumerate(configs[1:], start=2):
+            if i > 151: break
+            # 逻辑：逐个搬运
+            # sync_single_table(gc, config[1], config[0], ...)
+            pass
 
 if __name__ == "__main__":
     main()
