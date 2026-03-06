@@ -21,6 +21,13 @@ def parse_fs_url(url):
     table_id = re.search(r"table=([a-zA-Z0-9]+)", url)
     return (app_token.group(1), table_id.group(1)) if app_token and table_id else (None, None)
 
+def get_col_letter(col_idx):
+    letter = ""
+    while col_idx > 0:
+        col_idx, remainder = divmod(col_idx - 1, 26)
+        letter = chr(65 + remainder) + letter
+    return letter
+
 def sync_matrix_worker():
     payload_raw = os.environ.get('PAYLOAD', '{}')
     payload = json.loads(payload_raw) if payload_raw and payload_raw != 'null' else {}
@@ -112,7 +119,11 @@ def sync_matrix_worker():
                 ws = sub_ss.worksheet(target_tab)
             except:
                 ws = sub_ss.add_worksheet(title=target_tab, rows="1000", cols="20")
-            ws.clear()
+            
+            num_cols = len(ordered_fields)
+            col_letter = get_col_letter(num_cols)
+            ws.batch_clear([f"A:{col_letter}"])
+            
             ws.update(values=output, range_name='A1', value_input_option='USER_ENTERED')
 
         bj_now_str = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
