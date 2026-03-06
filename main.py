@@ -12,7 +12,7 @@ def get_gc():
     return gspread.authorize(creds)
 
 def get_fs_token():
-    res = requests.post("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", 
+    res = requests.post("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
                         json={"app_id": os.environ.get("FEISHU_APP_ID"), "app_secret": os.environ.get("FEISHU_APP_SECRET")})
     return res.json().get("tenant_access_token")
 
@@ -25,45 +25,33 @@ def sync_matrix_worker():
     payload_raw = os.environ.get('PAYLOAD', '{}')
     payload = json.loads(payload_raw) if payload_raw and payload_raw != 'null' else {}
     is_manual = payload.get('priority') == '1_MANUAL'
-
-    if not is_manual:
-        bj_now = datetime.utcnow() + timedelta(hours=8)
-        if not ("09:00" <= bj_now.strftime('%H:%M') <= "11:30"):
-            return
+    manual_source_id = payload.get('source_id')
+    manual_row = payload.get('row')
 
     gc = get_gc()
     master_ws = gc.open_by_key(MASTER_ID).get_worksheet(0)
+
     row_data = master_ws.row_values(TARGET_ROW)
     row_data += [""] * (6 - len(row_data))
 
-    if not row_data[0] or "google" not in row_data[0]: return 
+    if not row_data[0] or "google" not in row_data[0]: return
 
     sub_url = row_data[0]
     current_status = row_data[3]
-    
+
     sub_id_match = re.search(r"/d/([a-zA-Z0-9-_]+)", sub_url)
     if not sub_id_match: return
     sub_id = sub_id_match.group(1)
 
-    manual_source_id = payload.get('source_id')
-    manual_row = payload.get('row')
-
-    if not is_manual and "暂停" in current_status:
-        return 
+    if not is_manual and "暂停" in current_status: return
 
     should_run = False
     sync_all_in_sub = False
     target_sub_row = None
 
-    if not is_manual:
-        should_run = True
-        sync_all_in_sub = True
-    else:
+    if is_manual:
         if manual_source_id == MASTER_ID:
-            if manual_row == 2:
-                should_run = True
-                sync_all_in_sub = True
-            elif manual_row == TARGET_ROW:
+            if manual_row == 2 or manual_row == TARGET_ROW:
                 should_run = True
                 sync_all_in_sub = True
         elif manual_source_id == sub_id:
@@ -83,8 +71,8 @@ def sync_matrix_worker():
     sub_rows = sub_ws.get_all_values()
 
     fs_token = get_fs_token()
-    
     tables_to_sync = []
+    
     for i, r in enumerate(sub_rows[2:], start=3):
         r += [""] * (3 - len(r))
         fs_url, target_tab = r[0], r[1]
@@ -97,7 +85,7 @@ def sync_matrix_worker():
     total_tables = len(tables_to_sync)
 
     for idx, (i, fs_url, target_tab) in enumerate(tables_to_sync, 1):
-        progress_msg = f"🚀 正在刷新({idx}/{total_tables}): {target_tab}"
+        progress_msg = f"正在刷新({idx}/{total_tables}): {target_tab}"
         sub_ws.update_cell(i, 4, progress_msg)
         master_ws.update_cell(TARGET_ROW, 4, progress_msg)
 
@@ -106,7 +94,7 @@ def sync_matrix_worker():
 
         fields_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
         f_res = requests.get(fields_url, headers={"Authorization": f"Bearer {fs_token}"}).json()
-        ordered_fields = [f['field_name'] for f in f_res.get('data', {}).get('items', [])]
+        ordered_fields = [f['field_name'] for f in f_res.get('data', {}).get('items', []) if f['field_name'] != 'SourceID']
 
         all_items = []
         page_token, has_more = "", True
@@ -127,24 +115,20 @@ def sync_matrix_worker():
             ws.clear()
             ws.update(values=output, range_name='A1', value_input_option='USER_ENTERED')
 
-        bj_now = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
-        sub_ws.update(values=[[False, f"✅ 完成({len(all_items)}条)", bj_now, f"{int(time.time() - start_time)}s"]], range_name=f'C{i}:F{i}')
+        bj_now_str = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
+        sub_ws.update(values=[[False, f"✅ 完成({len(all_items)}条)", bj_now_str, f"{int(time.time() - start_time)}s"]], range_name=f'C{i}:F{i}')
 
-    bj_now = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
-    if is_manual:
-        if manual_source_id == sub_id:
-            if manual_row == 2:
-                sub_ws.update_cell(2, 3, False)
-            master_ws.update(values=[["", "✅ 副本触发完成", bj_now, f"{time.time()-start_time:.1f}s"]], range_name=f'C{TARGET_ROW}:F{TARGET_ROW}')
-        elif manual_source_id == MASTER_ID:
-            if manual_row == TARGET_ROW:
-                master_ws.update(values=[[False, "✅ 单行手触完成", bj_now, f"{time.time()-start_time:.1f}s"]], range_name=f'C{TARGET_ROW}:F{TARGET_ROW}')
-            elif manual_row == 2:
-                master_ws.update(values=[[False, "✅ 一键全量完成", bj_now, f"{time.time()-start_time:.1f}s"]], range_name=f'C{TARGET_ROW}:F{TARGET_ROW}')
-                time.sleep(1.5)
-                master_ws.update_cell(2, 3, False)
-    else:
-        master_ws.update(values=[["", "✅ 定时完成", bj_now, f"{time.time()-start_time:.1f}s"]], range_name=f'C{TARGET_ROW}:F{TARGET_ROW}')
+    bj_now_str = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
+    if manual_source_id == sub_id:
+        if manual_row == 2: sub_ws.update_cell(2, 3, False)
+        master_ws.update(values=[["", "✅ 副本触发完成", bj_now_str, f"{time.time()-start_time:.1f}s"]], range_name=f'C{TARGET_ROW}:F{TARGET_ROW}')
+    elif manual_source_id == MASTER_ID:
+        if manual_row == TARGET_ROW:
+            master_ws.update(values=[[False, "✅ 单行手触完成", bj_now_str, f"{time.time()-start_time:.1f}s"]], range_name=f'C{TARGET_ROW}:F{TARGET_ROW}')
+        elif manual_row == 2:
+            master_ws.update(values=[[False, "✅ 全量准时完成", bj_now_str, f"{time.time()-start_time:.1f}s"]], range_name=f'C{TARGET_ROW}:F{TARGET_ROW}')
+            time.sleep(1.5)
+            master_ws.update_cell(2, 3, False)
 
 if __name__ == "__main__":
     sync_matrix_worker()
