@@ -74,7 +74,12 @@ def sync_matrix_worker():
 
     start_time = time.time()
     sub_ss = gc.open_by_key(sub_id)
-    sub_ws = sub_ss.get_worksheet(0)
+    
+    try:
+        sub_ws = sub_ss.worksheet("汇总表")
+    except:
+        return
+        
     sub_rows = sub_ws.get_all_values()
 
     fs_token = get_fs_token()
