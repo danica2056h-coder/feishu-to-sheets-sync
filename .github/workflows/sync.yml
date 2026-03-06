@@ -1,12 +1,9 @@
-name: 飞书数据同步引擎-全自动动态矩阵版
+name: 飞书数据同步引擎-总控触发版
 
 on:
   repository_dispatch:
     types: [remote_sync]
   workflow_dispatch:
-  schedule:
-    - cron: '*/15 1-2 * * *'
-    - cron: '0,15,30 3 * * *'
 
 jobs:
   prepare_matrix:
