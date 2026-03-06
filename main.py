@@ -135,8 +135,14 @@ def sync_matrix_worker():
         sub_ws.update(values=[[False, f"✅ 完成({len(all_items)}条)", bj_now_str, f"{int(time.time() - start_time)}s"]], range_name=f'C{i}:F{i}')
 
     bj_now_str = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
+    
+    if sync_all_in_sub:
+        try:
+            sub_ws.update(values=[[False, "✅ 全部完成", bj_now_str, f"{time.time()-start_time:.1f}s"]], range_name='C2:F2')
+        except:
+            pass
+
     if manual_source_id == sub_id:
-        if manual_row == 2: sub_ws.update_cell(2, 3, False)
         master_ws.update(values=[["", "✅ 副本触发完成", bj_now_str, f"{time.time()-start_time:.1f}s"]], range_name=f'C{TARGET_ROW}:F{TARGET_ROW}')
     elif manual_source_id == MASTER_ID:
         if manual_row == TARGET_ROW:
