@@ -19,7 +19,12 @@ def get_fs_token():
 def parse_fs_url(url):
     app_token = re.search(r"base/([a-zA-Z0-9]+)", url)
     table_id = re.search(r"table=([a-zA-Z0-9]+)", url)
-    return (app_token.group(1), table_id.group(1)) if app_token and table_id else (None, None)
+    view_id = re.search(r"view=([a-zA-Z0-9]+)", url)
+    return (
+        app_token.group(1) if app_token else None, 
+        table_id.group(1) if table_id else None,
+        view_id.group(1) if view_id else None
+    )
 
 def get_col_letter(col_idx):
     letter = ""
@@ -101,10 +106,14 @@ def sync_matrix_worker():
         sub_ws.update_cell(i, 4, progress_msg)
         master_ws.update_cell(TARGET_ROW, 4, progress_msg)
 
-        app_token, table_id = parse_fs_url(fs_url)
-        if not app_token: continue
+        app_token, table_id, view_id = parse_fs_url(fs_url)
+        if not app_token or not table_id: continue
 
-        fields_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
+        if view_id:
+            fields_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/views/{view_id}/fields"
+        else:
+            fields_url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
+            
         f_res = requests.get(fields_url, headers={"Authorization": f"Bearer {fs_token}"}).json()
         ordered_fields = [f['field_name'] for f in f_res.get('data', {}).get('items', []) if f['field_name'] != 'SourceID']
 
@@ -126,8 +135,9 @@ def sync_matrix_worker():
                 ws = sub_ss.add_worksheet(title=target_tab, rows="1000", cols="20")
             
             num_cols = len(ordered_fields)
-            col_letter = get_col_letter(num_cols)
-            ws.batch_clear([f"A:{col_letter}"])
+            if num_cols > 0:
+                col_letter = get_col_letter(num_cols)
+                ws.batch_clear([f"A:{col_letter}"])
             
             ws.update(values=output, range_name='A1', value_input_option='USER_ENTERED')
 
